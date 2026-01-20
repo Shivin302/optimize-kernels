@@ -1,0 +1,16 @@
+[
+    {
+        "x": {
+            "shape": [20, 1024, 512],
+            "dtype": "float32"
+        },
+        "gamma": {
+            "shape": [512],
+            "dtype": "float32"
+        },
+        "epsilon": {
+            "shape": [1],
+            "dtype": "float32"
+        }
+    }
+]
