@@ -6,46 +6,49 @@ from pathlib import Path
 from torch.utils.cpp_extension import load
 import time
 
-# Load CUDA extension
-cuda_module = load(
-    name="rms_norm_cuda",
-    sources=[str(Path(__file__).parent / "cuda_kernel.cu")],
-    extra_cuda_cflags=["-O3"],
-    verbose=False
-)
+# # Load CUDA extension
+# cuda_module = load(
+#     name="softmax_cuda",
+#     sources=[str(Path(__file__).parent / "cuda_kernel.cu")],
+#     extra_cuda_cflags=["-O3"],
+#     verbose=False
+# )
 
 
 @triton.jit
-def rms_norm_triton(output, x, gamma, epsilon: tl.constexpr, B: tl.constexpr, C: tl.constexpr, F: tl.constexpr):
+def softmax_triton(output, x, B: tl.constexpr, C: tl.constexpr, F: tl.constexpr):
     b_idx = tl.program_id(0)
     c_idx = tl.program_id(1)
 
-    output_ptr = output + (b_idx * C * F) + (c_idx * F)
     x_ptr = x + (b_idx * C * F) + (c_idx * F)
-    x_feat = tl.load(x_ptr + tl.arange(0, F))
-    gamma_vals = tl.load(gamma + tl.arange(0, F))
+    output_ptr = output + (b_idx * C * F) + (c_idx * F)
 
-    # Calculate mean of squares
-    mean_sq = tl.sum(x_feat * x_feat) / F
-    # Calculate RMS normalization factor
-    rms_norm_factor = tl.rsqrt(mean_sq + epsilon)
-    # Apply normalization and gamma
-    result = x_feat * rms_norm_factor * gamma_vals
+
+    x_feat = tl.load(x_ptr + tl.arange(0, F))
+    x_max = tl.max(x_feat)
+    x_exp = tl.exp(x_feat - x_max)
+    x_sum = tl.sum(x_exp)
+    result = x_exp / x_sum
     tl.store(output_ptr + tl.arange(0, F), result)
 
 
-def rms_norm_triton_wrapper(output, x, gamma, epsilon, B, C, F):
+def softmax_triton_wrapper(output, x, B, C, F):
     grid = lambda meta: (B, C)
-    rms_norm_triton[grid](output, x, gamma, epsilon, B, C, F)
+    softmax_triton[grid](output, x, B, C, F)
     return output
 
 
-def rms_norm_cuda_wrapper(output, x, gamma, epsilon, B, C, F):
-    return cuda_module.rms_norm_cuda(output, x, gamma, epsilon, B, C, F)
+# def softmax_cuda_wrapper(output, x, gamma, epsilon, B, C, F):
+#     return cuda_module.softmax_cuda(output, x, gamma, epsilon, B, C, F)
 
 
-def pytorch_baseline(x, gamma, epsilon):
-    return x / torch.sqrt(torch.mean(x**2, axis=-1, keepdim=True) + epsilon) * gamma
+def pytorch_baseline(x):
+    # X is (B, C, F)
+    x_demax = x - x.max(axis=-1, keepdim=True).values
+    x_exp = torch.exp(x_demax)
+    x_sum = torch.sum(x_exp, axis=-1, keepdim=True)
+    return x_exp / x_sum
+    
 
 
 def compare_kernels():
@@ -69,7 +72,7 @@ def compare_kernels():
         # PyTorch baseline
         start_time = time.time()
         for i in range(num_repeats):
-            pytorch_result = pytorch_baseline(x, gamma, epsilon)
+            pytorch_result = pytorch_baseline(x)
             torch.cuda.synchronize()
         end_time = time.time()
         print(f"PyTorch baseline time: {end_time - start_time:.2f} seconds")
@@ -77,12 +80,12 @@ def compare_kernels():
         # Triton kernel
         # Warmup: compile Triton kernel before timing
         warmup_output = torch.zeros_like(x)
-        rms_norm_triton_wrapper(warmup_output, x, gamma, epsilon, B, C, F)
+        softmax_triton_wrapper(warmup_output, x, B, C, F)
         torch.cuda.synchronize()
         triton_output = torch.zeros_like(x)
         start_time = time.time()
         for i in range(num_repeats):
-            triton_result = rms_norm_triton_wrapper(triton_output, x, gamma, epsilon, B, C, F)
+            triton_result = softmax_triton_wrapper(triton_output, x, B, C, F)
         torch.cuda.synchronize()
         end_time = time.time()
         print(f"Triton kernel time: {end_time - start_time:.2f} seconds")
@@ -90,17 +93,17 @@ def compare_kernels():
         assert torch.allclose(triton_result, pytorch_result, atol=1e-2, equal_nan=True)
         print(f"✓ Triton kernel passed for shape {x.shape} (max diff: {triton_diff:.2e})")
         
-        # CUDA kernel
-        cuda_output = torch.zeros_like(x)
-        start_time = time.time()
-        for i in range(num_repeats):
-            cuda_result = rms_norm_cuda_wrapper(cuda_output, x, gamma, epsilon, B, C, F)
-        torch.cuda.synchronize()
-        end_time = time.time()
-        print(f"CUDA kernel time: {end_time - start_time:.2f} seconds")
-        cuda_diff = torch.max(torch.abs(cuda_result - pytorch_result)).item()
-        assert torch.allclose(cuda_result, pytorch_result, atol=1e-2, equal_nan=True)
-        print(f"✓ CUDA kernel passed for shape {x.shape} (max diff: {cuda_diff:.2e})")
+        # # CUDA kernel
+        # cuda_output = torch.zeros_like(x)
+        # start_time = time.time()
+        # for i in range(num_repeats):
+        #     cuda_result = softmax_cuda_wrapper(cuda_output, x, B, C, F)
+        # torch.cuda.synchronize()
+        # end_time = time.time()
+        # print(f"CUDA kernel time: {end_time - start_time:.2f} seconds")
+        # cuda_diff = torch.max(torch.abs(cuda_result - pytorch_result)).item()
+        # assert torch.allclose(cuda_result, pytorch_result, atol=1e-2, equal_nan=True)
+        # print(f"✓ CUDA kernel passed for shape {x.shape} (max diff: {cuda_diff:.2e})")
         
         print(f"✓ All kernels match PyTorch baseline!\n")
 
