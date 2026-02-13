@@ -1,0 +1,12 @@
+[
+    {
+        "x": {
+            "shape": [64, 2048, 4096],
+            "dtype": "float32"
+        },
+        "gamma": {
+            "shape": [4096],
+            "dtype": "float32"
+        }
+    }
+]
